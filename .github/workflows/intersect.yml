@@ -1,0 +1,231 @@
+name: intersect
+
+# Intersect* optimization A/B: SAME commit, three builds.
+#   base     : VSF_INTERSECT_OPT=OFF, VSF_PROFILE=OFF  (original loops)
+#   opt      : VSF_INTERSECT_OPT=ON,  VSF_PROFILE=OFF  (branchless + fused)
+#   opt_prof : VSF_INTERSECT_OPT=ON,  VSF_PROFILE=ON   (optimized + profile table)
+# Verifies bit-identical output across all three and times base vs opt.
+# Artifact suffix: intersect.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: intersect-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-ab:
+    runs-on: windows-latest
+    timeout-minutes: 300
+    env:
+      VCPKG_DISABLE_METRICS: "1"
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vcpkg-bincache
+      VCPKG_DOWNLOADS: ${{ github.workspace }}\vcpkg-downloads
+      VCPKG_ROOT: ${{ github.workspace }}\vcpkg
+      VCPKG_INSTALLED_DIR: ${{ github.workspace }}\vcpkg_installed
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Toolchain info
+        shell: pwsh
+        run: |
+          cmake --version | Select-Object -First 1
+          ninja --version
+          "commit=$((git rev-parse HEAD))"
+
+      - name: Cache vcpkg (binary cache + downloads)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ github.workspace }}\vcpkg-bincache
+            ${{ github.workspace }}\vcpkg-downloads
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json', 'triplets/x64-windows-static.cmake') }}
+          restore-keys: vcpkg-${{ runner.os }}-
+
+      - name: Bootstrap vcpkg
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force "$env:VCPKG_DEFAULT_BINARY_CACHE" | Out-Null
+          git clone https://github.com/microsoft/vcpkg.git "$env:VCPKG_ROOT"
+          & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
+          & "$env:VCPKG_ROOT\vcpkg.exe" version
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure + build three arms (same commit)
+        shell: pwsh
+        run: |
+          $arms = @(
+            @{ n='base';     opt='OFF'; prof='OFF' },
+            @{ n='opt';      opt='ON';  prof='OFF' },
+            @{ n='opt_prof'; opt='ON';  prof='ON' }
+          )
+          foreach ($a in $arms) {
+            cmake -S . -B "build_$($a.n)" -G Ninja -DCMAKE_BUILD_TYPE=Release `
+              -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
+              -DVCPKG_TARGET_TRIPLET=x64-windows-static `
+              -DVCPKG_OVERLAY_TRIPLETS="$env:GITHUB_WORKSPACE/triplets" `
+              -DVCPKG_INSTALLED_DIR="$env:VCPKG_INSTALLED_DIR" `
+              -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
+              -DUSE_CUDA=OFF -DBUILD_TESTING=OFF -DVSF_INTERSECT_OPT=$($a.opt) -DVSF_PROFILE=$($a.prof)
+            if ($LASTEXITCODE -ne 0) { throw "configure $($a.n) failed" }
+            cmake --build "build_$($a.n)" --parallel
+            if ($LASTEXITCODE -ne 0) { throw "build $($a.n) failed" }
+          }
+
+      - name: Stage all three builds
+        shell: pwsh
+        run: |
+          foreach ($v in @('base','opt','opt_prof')) {
+            $dst = "stage_$v"
+            New-Item -ItemType Directory -Force $dst | Out-Null
+            Copy-Item "build_$v\VideoSubFinderCli.exe" "$dst\VideoSubFinderCli_$v.exe"
+            Copy-Item -Recurse "build_$v\settings" "$dst\settings"
+            & ".\$dst\VideoSubFinderCli_$v.exe" --version
+          }
+          Get-ChildItem stage_*\*.exe | Select-Object FullName, Length
+
+      - name: Generate test clips (60 s synthetic + dense two-line)
+        shell: pwsh
+        run: |
+          function Resolve-FFmpeg {
+            $c = Get-Command ffmpeg -ErrorAction SilentlyContinue
+            if ($c) { return $c.Source }
+            foreach ($p in @("$env:ProgramFiles\ffmpeg\bin\ffmpeg.exe", "C:\ffmpeg\bin\ffmpeg.exe", "C:\tools\ffmpeg\bin\ffmpeg.exe", "C:\ProgramData\chocolatey\bin\ffmpeg.exe")) {
+              if (Test-Path $p) { return $p }
+            }
+            return $null
+          }
+          $ffmpeg = Resolve-FFmpeg
+          if (-not $ffmpeg) {
+            Write-Host "ffmpeg not on PATH - installing via chocolatey"
+            choco install ffmpeg -y --no-progress --limit-output
+            $env:PATH = "C:\ProgramData\chocolatey\bin;$env:PATH"
+            $ffmpeg = Resolve-FFmpeg
+          }
+          if (-not $ffmpeg) { throw "ffmpeg is unavailable (install failed)" }
+          Write-Host "ffmpeg: $ffmpeg"
+          $drawtext = (& $ffmpeg -hide_banner -filters 2>&1 | Select-String -Pattern 'drawtext')
+          if (-not $drawtext) { throw "this ffmpeg build has no drawtext filter (no freetype)" }
+
+          New-Item -ItemType Directory -Force media | Out-Null
+
+          $segments = 0..11 | ForEach-Object {
+            $s = $_ * 5
+            "drawtext=fontfile='C\:/Windows/Fonts/arialbd.ttf':text='LINE NUMBER $($_)':fontsize=42:fontcolor=white:borderw=3:bordercolor=black:x=(w-text_w)/2:y=h-95:enable='between(t,$s,$($s+3))'"
+          }
+          & $ffmpeg -v error -y -f lavfi -i "color=c=0x2a3b52:s=1280x720:r=25:d=60" -vf ($segments -join ',') -c:v libx264 -preset veryfast -crf 20 media\clip_60s.mp4
+          if ($LASTEXITCODE -ne 0) { throw "ffmpeg clip_60s generation failed" }
+
+          $dense = 0..19 | ForEach-Object {
+            $two = $_.ToString('00')
+            $t0 = $_ * 3
+            $t1 = $t0 + 2.95
+            "drawtext=fontfile='C\:/Windows/Fonts/arialbd.ttf':text='SUB ${two} - TOP LINE':fontsize=40:fontcolor=white:borderw=3:bordercolor=black:x=(w-text_w)/2:y=h-150:enable='between(t,$t0,$t1)'"
+            "drawtext=fontfile='C\:/Windows/Fonts/arialbd.ttf':text='bottom ${two} text':fontsize=40:fontcolor=white:borderw=3:bordercolor=black:x=(w-text_w)/2:y=h-100:enable='between(t,$t0,$t1)'"
+          }
+          & $ffmpeg -v error -y -f lavfi -i "color=c=0x1b2430:s=1280x720:r=25:d=60" -vf ($dense -join ',') -c:v libx264 -preset veryfast -crf 20 media\clip_dense_60s.mp4
+          if ($LASTEXITCODE -ne 0) { throw "ffmpeg clip_dense_60s generation failed" }
+
+          Get-ChildItem media\*.mp4 | Select-Object Name, Length
+
+      - name: Identity A/B (same clip, same flags)
+        shell: pwsh
+        run: |
+          function Get-ManifestHash([string]$dir) {
+            $files = Get-ChildItem $dir -Recurse -File -ErrorAction SilentlyContinue |
+              Where-Object { $_.Extension -match '^\.(jpeg|jpg|png|bmp|srt|txt)$' } | Sort-Object FullName
+            $lines = foreach ($f in $files) {
+              $h = (Get-FileHash $f.FullName -Algorithm SHA256).Hash
+              "$h  $($f.FullName.Substring($dir.Length))"
+            }
+            $bytes = [Text.Encoding]::UTF8.GetBytes(($lines -join "`n"))
+            $sha = [Security.Cryptography.SHA256]::Create()
+            [pscustomobject]@{
+              hash  = ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','')
+              files = $files.Count
+            }
+          }
+          $rows = @()
+          foreach ($clip in @('clip_60s','clip_dense_60s')) {
+            $video = (Resolve-Path "media\$clip.mp4").Path
+            foreach ($v in @('base','opt','opt_prof')) {
+              $exe = (Resolve-Path "stage_$v\VideoSubFinderCli_$v.exe").Path
+              for ($i = 1; $i -le 3; $i++) {
+                $out = Join-Path $env:GITHUB_WORKSPACE "ab_${clip}_${v}_$i"
+                Remove-Item $out -Recurse -Force -ErrorAction SilentlyContinue
+                New-Item -ItemType Directory -Force $out | Out-Null
+                $log = "stdout_${clip}_${v}_$i.txt"
+                $sw = [Diagnostics.Stopwatch]::StartNew()
+                & $exe -ovffmpeg -c -r -i $video -o $out -te 0.115 -be 0.04 -le 0.2 -re 0.8 2>$null | Out-File -FilePath $log -Encoding utf8
+                $sw.Stop()
+                $code = $LASTEXITCODE
+                $m = Get-ManifestHash $out
+                $rows += [pscustomobject]@{
+                  clip    = $clip
+                  variant = $v
+                  run     = $i
+                  wall_s  = [math]::Round($sw.Elapsed.TotalSeconds, 3)
+                  exit    = $code
+                  rgb     = (Get-ChildItem (Join-Path $out 'RGBImages') -File -ErrorAction SilentlyContinue).Count
+                  files   = $m.files
+                  hash    = $m.hash
+                }
+              }
+            }
+          }
+          $rows | Format-Table -AutoSize | Out-String | Write-Host
+          $rows | Export-Csv -NoTypeInformation intersect_results.csv
+
+          foreach ($clip in @('clip_60s','clip_dense_60s')) {
+            $sub = $rows | Where-Object clip -eq $clip
+            $hashes = @($sub | Select-Object -ExpandProperty hash | Sort-Object -Unique)
+            Write-Host "$clip distinct hashes: $($hashes.Count)"
+            if ($hashes.Count -ne 1) { throw "$clip output hash differs between base/opt/opt_prof builds" }
+            if (($sub | Where-Object { $_.rgb -eq 0 }).Count -gt 0) { throw "$clip yielded no subtitles" }
+          }
+
+          function Get-Median($v) {
+            $s = $v | Sort-Object
+            if ($s.Count % 2 -eq 1) { return $s[[int]($s.Count/2)] }
+            return ($s[$s.Count/2 - 1] + $s[$s.Count/2]) / 2
+          }
+          foreach ($clip in @('clip_60s','clip_dense_60s')) {
+            $b = Get-Median @($rows | Where-Object { $_.clip -eq $clip -and $_.variant -eq 'base' } | Select-Object -ExpandProperty wall_s)
+            $o = Get-Median @($rows | Where-Object { $_.clip -eq $clip -and $_.variant -eq 'opt' } | Select-Object -ExpandProperty wall_s)
+            $gain = [math]::Round((($b - $o) / $b) * 100, 2)
+            Write-Host "$clip median base=$b opt=$o gain_pct=$gain" | Tee-Object -FilePath "ab_summary_$clip.txt" -Append
+          }
+
+          $table = Get-Content stdout_clip_dense_60s_opt_prof_1.txt | Select-String -Pattern '=== VSF PROFILE' -Context 0,20
+          $table | Out-String | Write-Host
+          $table | Out-File -FilePath profile_table_opt.txt -Encoding utf8
+
+      - name: Upload artifacts (suffix intersect)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vsf-cli-intersect
+          path: |
+            stage_base/**
+            stage_opt/**
+            stage_opt_prof/**
+            intersect_results.csv
+            ab_summary_*.txt
+            profile_table_opt.txt
+            stdout_*.txt
+            media/clip_60s.mp4
+            media/clip_dense_60s.mp4
+          retention-days: 30

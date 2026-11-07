@@ -232,6 +232,17 @@ template <class T1, class T2>
 void IntersectTwoImages(simple_buffer<T1>& ImRes, simple_buffer<T2>& Im2, int w, int h, T1 zero_val)
 {
 	VSF_PROFILE_SCOPE(P_INTERSECT_TWO_IMAGES);
+#ifdef VSF_INTERSECT_OPT
+	// Branchless select: a single vectorisable pass (no data-dependent branch).
+	// Bit-identical to the original nested-if form for every T1/T2/zero_val.
+	T1* res = ImRes.m_pData;
+	const T2* src = Im2.m_pData;
+	const int size = w * h;
+	for (int i = 0; i < size; i++)
+	{
+		res[i] = (src[i] == 0) ? zero_val : res[i];
+	}
+#else
 	int i, size;
 
 	size = w * h;
@@ -242,12 +253,33 @@ void IntersectTwoImages(simple_buffer<T1>& ImRes, simple_buffer<T2>& Im2, int w,
 			ImRes[i] = zero_val;
 		}
 	}
+#endif
 }
 
 template <class T1, class T2>
 void IntersectImages(simple_buffer<T1>& ImRes, simple_buffer<simple_buffer<T2>*>& ImIn, int min_id_im_in, int max_id_im_in, int w, int h)
 {
 	VSF_PROFILE_SCOPE(P_INTERSECT_IMAGES);
+#ifdef VSF_INTERSECT_OPT
+	// Hoisted ImRes[i] and branchless AND over the input range.
+	// Bit-identical: an element can only become 0 (never return to non-zero),
+	// so removing the old `&& ImRes[i]` early-exit cannot change any result.
+	T1* res = ImRes.m_pData;
+	const int size = w * h;
+	for (int i = 0; i < size; i++)
+	{
+		const T1 r = res[i];
+		int keep = (r != 0) ? 1 : 0;
+		for (int im_id = min_id_im_in; im_id <= max_id_im_in; im_id++)
+		{
+			if ((*(ImIn[im_id]))[i] == 0)
+			{
+				keep = 0;
+			}
+		}
+		res[i] = keep ? r : (T1)0;
+	}
+#else
 	int i, size, im_id;
 
 	size = w * h;
@@ -261,6 +293,7 @@ void IntersectImages(simple_buffer<T1>& ImRes, simple_buffer<simple_buffer<T2>*>
 			}
 		}
 	}
+#endif
 }
 
 template <class T>

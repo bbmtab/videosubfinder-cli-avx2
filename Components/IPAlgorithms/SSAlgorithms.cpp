@@ -143,6 +143,23 @@ template <class T1, class T2>
 inline void IntersectYImages(simple_buffer<T1> &ImRes, simple_buffer<T2> &Im2, int w, int h)
 {
 	VSF_PROFILE_SCOPE(P_INTERSECT_Y_2);
+#ifdef VSF_INTERSECT_OPT
+	// Branchless range test. Dropping the old `if (ImRes[i])` guard is
+	// bit-identical: with ImRes[i]==0 the range test can only keep 0 (a
+	// source value >= 0 is never < 0 - g_max_dl_down), and the else-branch
+	// would write 0 anyway.
+	T1* res = ImRes.m_pData;
+	const T2* src = Im2.m_pData;
+	const int size = w * h;
+	const int down = g_max_dl_down;
+	const int up = g_max_dl_up;
+	for (int i = 0; i < size; i++)
+	{
+		const int r = (int)res[i];
+		const int s = (int)src[i];
+		res[i] = (s >= r - down && s <= r + up) ? res[i] : (T1)0;
+	}
+#else
 	int i, size;
 
 	size = w * h;
@@ -160,17 +177,42 @@ inline void IntersectYImages(simple_buffer<T1> &ImRes, simple_buffer<T2> &Im2, i
 			}
 		}
 	}
+#endif
 }
 
 template <class T1, class T2>
 inline void IntersectYImages(simple_buffer<T1>& ImRes, simple_buffer<simple_buffer<T2>*>& ImIn, int min_id_im_in, int max_id_im_in, int w, int h)
 {
 	VSF_PROFILE_SCOPE(P_INTERSECT_Y_N);
+#ifdef VSF_INTERSECT_OPT
+	// Same reasoning as IntersectImages: each element only ever becomes 0,
+	// and the range test in the original compares against the *current*
+	// (already zeroed) value only after a violation - by then the result is
+	// 0 either way. Hoisted r + branchless AND is bit-identical.
+	T1* res = ImRes.m_pData;
+	const int size = w * h;
+	const int down = g_max_dl_down;
+	const int up = g_max_dl_up;
+	for (int i = 0; i < size; i++)
+	{
+		const int r = (int)res[i];
+		int keep = (r != 0) ? 1 : 0;
+		for (int im_id = min_id_im_in; im_id <= max_id_im_in; im_id++)
+		{
+			const int s = (int)(*(ImIn[im_id]))[i];
+			if (s < r - down || s > r + up)
+			{
+				keep = 0;
+			}
+		}
+		res[i] = keep ? (T1)r : (T1)0;
+	}
+#else
 	int i, size, im_id;
 
 	size = w * h;
 	for (i = 0; i < size; i++)
-	{	
+	{
 		for (im_id = min_id_im_in; (im_id <= max_id_im_in) && ImRes[i]; im_id++)
 		{
 			if ((int)(*(ImIn[im_id]))[i] < (int)ImRes[i] - g_max_dl_down)
@@ -183,7 +225,10 @@ inline void IntersectYImages(simple_buffer<T1>& ImRes, simple_buffer<simple_buff
 			}
 		}
 	}
+#endif
 }
+
+#ifdef VSF_INTERSECT_OPT
 
 
 int CompareTwoSubsByOffset(simple_buffer<simple_buffer<u8>*> &ImForward, simple_buffer<simple_buffer<u16>*> &ImYForward, simple_buffer<simple_buffer<u8>*> &ImNEForward,
@@ -2460,6 +2505,25 @@ int DifficultCompareTwoSubs2(simple_buffer<u8>& ImF1, simple_buffer<u16>* pImILA
 	return res;
 }
 
+// Fused two-image intersection: ImRes = ImRes AND ImA AND ImB in ONE pass.
+// Used where the original code did two sequential IntersectTwoImages passes
+// over the same buffer. Bit-identical: an element becomes zero_val iff
+// either source is zero, and a zeroed element can never become non-zero.
+template <class T1, class T2>
+inline void IntersectTwoImagesPair(simple_buffer<T1>& ImRes, simple_buffer<T2>& ImA, simple_buffer<T2>& ImB, int w, int h, T1 zero_val = 0)
+{
+	VSF_PROFILE_SCOPE(P_INTERSECT_TWO_IMAGES);
+	T1* res = ImRes.m_pData;
+	const T2* a = ImA.m_pData;
+	const T2* b = ImB.m_pData;
+	const int size = w * h;
+	for (int i = 0; i < size; i++)
+	{
+		res[i] = (a[i] == 0 || b[i] == 0) ? zero_val : res[i];
+	}
+}
+#endif // VSF_INTERSECT_OPT
+
 int CompareTwoSubs(simple_buffer<u8>& Im1, simple_buffer<u16>* pImILA1, simple_buffer<u8>& ImVE11, simple_buffer<u8>& ImVE12, simple_buffer<u8>& Im2, simple_buffer<u16>* pImILA2, simple_buffer<u8>& ImVE2, int w, int h, int W, int H, std::string iter_det)
 {
 	simple_buffer<u8> ImRES(w * h, (u8)0);
@@ -2784,7 +2848,12 @@ int CompareTwoSubs(simple_buffer<u8>& Im1, simple_buffer<u16>* pImILA1, simple_b
 
 			if (ImVE11.m_pData != ImVE12.m_pData)
 			{
+#ifdef VSF_INTERSECT_OPT
+				// One fused pass instead of a second IntersectTwoImages pass.
+				IntersectTwoImagesPair(Im1, ImVE11, ImVE12, w, h);
+#else
 				IntersectTwoImages(Im1, ImVE12, w, h);
+#endif
 			}
 			
 			Im2 = Im1;
