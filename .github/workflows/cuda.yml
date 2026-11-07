@@ -167,13 +167,37 @@ jobs:
             Write-Host $t
             if ($t -notmatch 'sm_61') { throw "$v : no sm_61 cubin in the executable" }
           }
+
+          # The CLI only compiles IPAlgorithms + OCVVideo (no FFMPEGVideo.cpp), so
+          # NV12_to_BGR/NPP is never referenced and gets dead-stripped: the only CUDA
+          # runtime import is cudart. Derive the required DLL set from the binary
+          # instead of assuming, so a future NPP reference cannot ship unresolvable.
+          $shipped = @('cudart64_12.dll')
           foreach ($v in @('cuda','cuda_avx2')) {
             dumpbin /dependents "stage_$v\VideoSubFinderCli_$v.exe" > "dep_$v.txt"
             $d = Get-Content "dep_$v.txt" -Raw
-            foreach ($need in @('cudart64_12.dll','nppc64_12.dll','nppicc64_12.dll','nppig64_12.dll')) {
-              if ($d -notmatch [regex]::Escape($need)) { throw "$v : missing import $need" }
+            $imports = [regex]::Matches($d, '(?i)\b(?:cudart|npp[a-z]*|cublas|cufft|curand|nvrtc)[a-z0-9_]*64_12\.dll') |
+              ForEach-Object { $_.Value.ToLower() } | Sort-Object -Unique
+            Write-Host "$v CUDA imports: $($imports -join ', ')"
+            if ($imports.Count -eq 0) { throw "$v : no CUDA runtime import at all (USE_CUDA build broken?)" }
+            foreach ($imp in $imports) {
+              if ($shipped -notcontains $imp) { throw "$v : imports $imp but the package does not ship it" }
             }
-            Write-Host "$v : all CUDA runtime imports present"
+            Write-Host "$v : every CUDA import is present in the package"
+          }
+
+          # Transitive check over the shipped DLLs themselves (nvcuda.dll is the
+          # driver, supplied by Windows/NVIDIA, so it is intentionally not shipped).
+          $cudaBin = (Join-Path $env:CUDA_PATH 'bin')
+          foreach ($dll in $shipped) {
+            $p = Join-Path $cudaBin $dll
+            if (-not (Test-Path $p)) { throw "cannot locate $dll in the CUDA toolkit at $cudaBin" }
+            dumpbin /dependents $p > "depdll_$dll.txt"
+            $t = Get-Content "depdll_$dll.txt" -Raw
+            $needs = [regex]::Matches($t, '(?i)\b[a-z0-9_]*64_12\.dll') | ForEach-Object { $_.Value.ToLower() } | Sort-Object -Unique
+            $missing = @($needs | Where-Object { $shipped -notcontains $_ })
+            Write-Host "$dll needs: $($needs -join ', ')"
+            if ($missing.Count -gt 0) { throw "$dll : unresolvable sibling dependency $($missing -join ', ')" }
           }
 
       - name: Generate 720p test clip
@@ -268,7 +292,10 @@ jobs:
         shell: pwsh
         run: |
           $cudaBin = Join-Path $env:CUDA_PATH 'bin'
-          $dlls = @('cudart64_12.dll','nppc64_12.dll','nppicc64_12.dll','nppig64_12.dll')
+          # Only cudart is imported by this CLI (see the verify step): NPP is linked
+          # but dead-stripped because FFMPEGVideo.cpp is not part of vsf_core, so
+          # shipping npp*_12.dll would just add ~42 MB of unused payload.
+          $dlls = @('cudart64_12.dll')
           foreach ($v in @('cuda','cuda_avx2')) {
             foreach ($d in $dlls) {
               $src = Join-Path $cudaBin $d
@@ -283,15 +310,17 @@ jobs:
               'VideoSubFinder CLI - CUDA build for GTX (Pascal / sm_61)',
               '',
               "exe      : VideoSubFinderCli_$v.exe",
-              "CUDA     : $env:CUDA_VERSION  (SASS architectures: $env:CUDA_ARCH)",
+              "CUDA     : $env:CUDA_VERSION  (embedded SASS: $env:CUDA_ARCH)",
               "built    : $sha",
               '',
-              'GPU use is opt-in. Add -uc to enable CUDA (kmeans clustering + NV12->BGR):',
+              'GPU use is opt-in. Add -uc to enable the CUDA kmeans clustering step:',
               '',
               "  VideoSubFinderCli_$v.exe -ovffmpeg -uc -c -r -i `"input.mp4`" -o `"out`" -te 0.115 -be 0.04 -le 0.2 -re 0.8",
               '',
               'Without -uc the binary runs on the CPU, identically to the non-CUDA build.',
-              'Keep the four cudart64_12/npp*_12 DLLs next to the exe.'
+              'Needs a Pascal-or-newer NVIDIA GPU + a current driver. cudart64_12.dll',
+              'is bundled next to the exe; nvcuda.dll comes from the driver and is not',
+              'shipped. The NPP libraries are not required by this build.'
             ) -join "`r`n"
             Set-Content -Path "stage_$v\README_CUDA.txt" -Value $readme -Encoding ASCII
             $bat = @(
@@ -320,6 +349,7 @@ jobs:
             elf_cuda_avx2.txt
             dep_cuda.txt
             dep_cuda_avx2.txt
+            depdll_*.txt
             uc_cpu.log
             uc_cuda.log
           retention-days: 30
