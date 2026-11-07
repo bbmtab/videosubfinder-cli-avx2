@@ -147,11 +147,14 @@ jobs:
           & $ffmpeg -v error -y -f lavfi -i "color=c=0x2a3b52:s=1280x720:r=25:d=60" -vf ($segments -join ',') -c:v libx264 -preset veryfast -crf 20 media\clip_60s.mp4
           if ($LASTEXITCODE -ne 0) { throw "ffmpeg clip_60s generation failed" }
 
-          # 60 s: two-line subtitle every 1 s, to drive CompareTwoSubsOptimal hard
-          $dense = 0..59 | ForEach-Object {
+          # 60 s: two-line subtitle, new pair every 3 s (VSF needs stable text
+          # for several frames; 1 s changes produced no detections).
+          $dense = 0..19 | ForEach-Object {
             $two = $_.ToString('00')
-            "drawtext=fontfile='C\:/Windows/Fonts/arialbd.ttf':text='SUB ${two} - TOP LINE':fontsize=34:fontcolor=white:borderw=3:bordercolor=black:x=(w-text_w)/2:y=h-150:enable='between(t,$_,$($_+0.95))'"
-            "drawtext=fontfile='C\:/Windows/Fonts/arialbd.ttf':text='bottom ${two} text':fontsize=34:fontcolor=white:borderw=3:bordercolor=black:x=(w-text_w)/2:y=h-100:enable='between(t,$_,$($_+0.95))'"
+            $t0 = $_ * 3
+            $t1 = $t0 + 2.95
+            "drawtext=fontfile='C\:/Windows/Fonts/arialbd.ttf':text='SUB ${two} - TOP LINE':fontsize=40:fontcolor=white:borderw=3:bordercolor=black:x=(w-text_w)/2:y=h-150:enable='between(t,$t0,$t1)'"
+            "drawtext=fontfile='C\:/Windows/Fonts/arialbd.ttf':text='bottom ${two} text':fontsize=40:fontcolor=white:borderw=3:bordercolor=black:x=(w-text_w)/2:y=h-100:enable='between(t,$t0,$t1)'"
           }
           & $ffmpeg -v error -y -f lavfi -i "color=c=0x1b2430:s=1280x720:r=25:d=60" -vf ($dense -join ',') -c:v libx264 -preset veryfast -crf 20 media\clip_dense_60s.mp4
           if ($LASTEXITCODE -ne 0) { throw "ffmpeg clip_dense_60s generation failed" }
