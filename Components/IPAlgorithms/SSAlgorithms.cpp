@@ -231,9 +231,6 @@ inline void IntersectYImages(simple_buffer<T1>& ImRes, simple_buffer<simple_buff
 #endif
 }
 
-#ifdef VSF_INTERSECT_OPT
-
-
 int CompareTwoSubsByOffset(simple_buffer<simple_buffer<u8>*> &ImForward, simple_buffer<simple_buffer<u16>*> &ImYForward, simple_buffer<simple_buffer<u8>*> &ImNEForward,
 			simple_buffer<u8> &ImIntS, simple_buffer<u16> &ImYS, simple_buffer<u8> &ImNES, simple_buffer<u8> &prevImNE,
 			int w, int h, int W, int H, int min_x, int max_x, int offset, int fn)
@@ -2508,6 +2505,7 @@ int DifficultCompareTwoSubs2(simple_buffer<u8>& ImF1, simple_buffer<u16>* pImILA
 	return res;
 }
 
+#ifdef VSF_INTERSECT_OPT
 // Fused two-image intersection: ImRes = ImRes AND ImA AND ImB in ONE pass.
 // Used where the original code did two sequential IntersectTwoImages passes
 // over the same buffer. Bit-identical: an element becomes zero_val iff

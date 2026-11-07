@@ -79,7 +79,7 @@ jobs:
               -DVCPKG_OVERLAY_TRIPLETS="$env:GITHUB_WORKSPACE/triplets" `
               -DVCPKG_INSTALLED_DIR="$env:VCPKG_INSTALLED_DIR" `
               -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
-              -DUSE_CUDA=OFF -DBUILD_TESTING=OFF -DVSF_INTERSECT_OPT=$($a.opt) -DVSF_PROFILE=$($a.prof)
+              -DUSE_CUDA=OFF -DBUILD_TESTING=OFF "-DVSF_INTERSECT_OPT:BOOL=$($a.opt)" "-DVSF_PROFILE:BOOL=$($a.prof)"
             if ($LASTEXITCODE -ne 0) { throw "configure $($a.n) failed" }
             cmake --build "build_$($a.n)" --parallel
             if ($LASTEXITCODE -ne 0) { throw "build $($a.n) failed" }
