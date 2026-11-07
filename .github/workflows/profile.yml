@@ -149,8 +149,9 @@ jobs:
 
           # 60 s: two-line subtitle every 1 s, to drive CompareTwoSubsOptimal hard
           $dense = 0..59 | ForEach-Object {
-            "drawtext=fontfile='C\:/Windows/Fonts/arialbd.ttf':text='SUB %02d - TOP LINE':fontsize=34:fontcolor=white:borderw=3:bordercolor=black:x=(w-text_w)/2:y=h-150:enable='between(t,$_,$($_+0.95))'" -f $_
-            "drawtext=fontfile='C\:/Windows/Fonts/arialbd.ttf':text='bottom %02d text':fontsize=34:fontcolor=white:borderw=3:bordercolor=black:x=(w-text_w)/2:y=h-100:enable='between(t,$_,$($_+0.95))'" -f $_
+            $two = $_.ToString('00')
+            "drawtext=fontfile='C\:/Windows/Fonts/arialbd.ttf':text='SUB ${two} - TOP LINE':fontsize=34:fontcolor=white:borderw=3:bordercolor=black:x=(w-text_w)/2:y=h-150:enable='between(t,$_,$($_+0.95))'"
+            "drawtext=fontfile='C\:/Windows/Fonts/arialbd.ttf':text='bottom ${two} text':fontsize=34:fontcolor=white:borderw=3:bordercolor=black:x=(w-text_w)/2:y=h-100:enable='between(t,$_,$($_+0.95))'"
           }
           & $ffmpeg -v error -y -f lavfi -i "color=c=0x1b2430:s=1280x720:r=25:d=60" -vf ($dense -join ',') -c:v libx264 -preset veryfast -crf 20 media\clip_dense_60s.mp4
           if ($LASTEXITCODE -ne 0) { throw "ffmpeg clip_dense_60s generation failed" }
