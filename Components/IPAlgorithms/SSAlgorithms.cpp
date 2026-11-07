@@ -188,7 +188,10 @@ inline void IntersectYImages(simple_buffer<T1>& ImRes, simple_buffer<simple_buff
 	// Same reasoning as IntersectImages: each element only ever becomes 0,
 	// and the range test in the original compares against the *current*
 	// (already zeroed) value only after a violation - by then the result is
-	// 0 either way. Hoisted r + branchless AND is bit-identical.
+	// 0 either way. Hoisted r + `keep &&` short-circuit is bit-identical,
+	// and the exit matters: masks are sparse, so most pixels must skip the
+	// remaining inputs (removing it was measured at ~0% / +97% for the
+	// N-forms).
 	T1* res = ImRes.m_pData;
 	const int size = w * h;
 	const int down = g_max_dl_down;
@@ -197,7 +200,7 @@ inline void IntersectYImages(simple_buffer<T1>& ImRes, simple_buffer<simple_buff
 	{
 		const int r = (int)res[i];
 		int keep = (r != 0) ? 1 : 0;
-		for (int im_id = min_id_im_in; im_id <= max_id_im_in; im_id++)
+		for (int im_id = min_id_im_in; keep && im_id <= max_id_im_in; im_id++)
 		{
 			const int s = (int)(*(ImIn[im_id]))[i];
 			if (s < r - down || s > r + up)
