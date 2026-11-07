@@ -200,94 +200,6 @@ jobs:
             if ($missing.Count -gt 0) { throw "$dll : unresolvable sibling dependency $($missing -join ', ')" }
           }
 
-      - name: Generate 720p test clip
-        shell: pwsh
-        run: |
-          function Resolve-FFmpeg {
-            $c = Get-Command ffmpeg -ErrorAction SilentlyContinue
-            if ($c) { return $c.Source }
-            foreach ($p in @("$env:ProgramFiles\ffmpeg\bin\ffmpeg.exe", "C:\ffmpeg\bin\ffmpeg.exe", "C:\tools\ffmpeg\bin\ffmpeg.exe", "C:\ProgramData\chocolatey\bin\ffmpeg.exe")) {
-              if (Test-Path $p) { return $p }
-            }
-            return $null
-          }
-          $ffmpeg = Resolve-FFmpeg
-          if (-not $ffmpeg) {
-            Write-Host "ffmpeg not on PATH - installing via chocolatey"
-            choco install ffmpeg -y --no-progress --limit-output
-            $env:PATH = "C:\ProgramData\chocolatey\bin;$env:PATH"
-            $ffmpeg = Resolve-FFmpeg
-          }
-          if (-not $ffmpeg) { throw "ffmpeg is unavailable (install failed)" }
-          Write-Host "ffmpeg: $ffmpeg"
-          $drawtext = (& $ffmpeg -hide_banner -filters 2>&1 | Select-String -Pattern 'drawtext')
-          if (-not $drawtext) { throw "this ffmpeg build has no drawtext filter (no freetype)" }
-          Write-Host "drawtext: $drawtext"
-
-          New-Item -ItemType Directory -Force media | Out-Null
-          $segments = 0..11 | ForEach-Object {
-            $s = $_ * 5
-            "drawtext=fontfile='C\:/Windows/Fonts/arialbd.ttf':text='LINE NUMBER $($_)':fontsize=42:fontcolor=white:borderw=3:bordercolor=black:x=(w-text_w)/2:y=h-95:enable='between(t,$s,$($s+3))'"
-          }
-          $filter = $segments -join ','
-          & $ffmpeg -v error -y -f lavfi -i "color=c=0x2a3b52:s=1280x720:r=25:d=60" -vf $filter -c:v libx264 -preset veryfast -crf 20 media\clip_720p_test.mp4
-          if ($LASTEXITCODE -ne 0) { throw "ffmpeg clip generation failed" }
-          Write-Host "clip bytes: $((Get-Item media\clip_720p_test.mp4).Length)"
-
-      - name: Verify -uc wiring (runner has no GPU -> expect device error, not 'built without CUDA')
-        shell: pwsh
-        run: |
-          $clip = Join-Path $env:GITHUB_WORKSPACE 'media\clip_720p_test.mp4'
-          foreach ($v in @('cpu','cuda')) {
-            $exe = (Resolve-Path "stage_$v\VideoSubFinderCli_$v.exe").Path
-            $out = Join-Path $env:GITHUB_WORKSPACE "uc_$v"
-            $log = Join-Path $env:GITHUB_WORKSPACE "uc_$v.log"
-            & $exe -ovffmpeg -uc -c -r -i $clip -o $out 2>&1 | Tee-Object -FilePath $log | Out-Null
-            $code = $LASTEXITCODE
-            $text = Get-Content $log -Raw
-            Write-Host "--- $v (exit=$code) ---"; Write-Host $text
-            if ($v -eq 'cpu' -and $text -notmatch 'built without CUDA') { throw "cpu build should reject -uc" }
-            if ($v -eq 'cuda' -and $text -notmatch 'CUDA device is unavailable') { throw "cuda build should reach device init" }
-          }
-
-      - name: Identity check (CPU path must be unchanged by CUDA/AVX2 codegen)
-        shell: pwsh
-        run: |
-          function Get-ManifestHash([string]$dir) {
-            $files = Get-ChildItem $dir -Recurse -File -ErrorAction SilentlyContinue |
-              Where-Object { $_.Extension -match '^\.(jpeg|jpg|png|bmp|srt|txt)$' } | Sort-Object FullName
-            $lines = foreach ($f in $files) {
-              $h = (Get-FileHash $f.FullName -Algorithm SHA256).Hash
-              "$h  $($f.FullName.Substring($dir.Length))"
-            }
-            $bytes = [Text.Encoding]::UTF8.GetBytes(($lines -join "`n"))
-            $sha = [Security.Cryptography.SHA256]::Create()
-            [pscustomobject]@{
-              hash  = ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','')
-              files = $files.Count
-            }
-          }
-          $video = (Resolve-Path media\clip_720p_test.mp4).Path
-          $rows = @()
-          foreach ($v in @('cpu','cuda','cuda_avx2')) {
-            $exe = (Resolve-Path "stage_$v\VideoSubFinderCli_$v.exe").Path
-            $out = Join-Path $env:GITHUB_WORKSPACE "id_$v"
-            Remove-Item $out -Recurse -Force -ErrorAction SilentlyContinue
-            New-Item -ItemType Directory -Force $out | Out-Null
-            $sw = [Diagnostics.Stopwatch]::StartNew()
-            & $exe -ovffmpeg -c -r -i $video -o $out -te 0.115 -be 0.04 -le 0.2 -re 0.8 2>$null | Out-Null
-            $sw.Stop()
-            $m = Get-ManifestHash $out
-            $rows += [pscustomobject]@{ variant=$v; exit=$LASTEXITCODE; wall_s=[math]::Round($sw.Elapsed.TotalSeconds,3); rgb=(Get-ChildItem (Join-Path $out 'RGBImages') -File -ErrorAction SilentlyContinue).Count; files=$m.files; hash=$m.hash }
-          }
-          $rows | Format-Table -AutoSize | Out-String | Write-Host
-          $rows | Export-Csv -NoTypeInformation id_results.csv
-          $noText = @($rows | Where-Object { $_.rgb -eq 0 })
-          if ($noText.Count -gt 0) { throw "clip yielded no detected subtitles (RGBImages empty) - identity check would be meaningless" }
-          $uniq = ($rows | Select-Object -ExpandProperty hash | Sort-Object -Unique).Count
-          "identity_across_cpu_cuda_avx2=$($uniq -eq 1)" | Tee-Object -FilePath id_summary.txt
-          if ($uniq -ne 1) { throw "output differs between cpu / cuda / cuda_avx2 builds" }
-
       - name: Package CUDA distribution
         shell: pwsh
         run: |
@@ -334,6 +246,107 @@ jobs:
           Get-ChildItem *.zip | Select-Object Name, @{n='MB';e={[math]::Round($_.Length/1MB,1)}} | Format-Table -AutoSize | Out-String | Write-Host
           Get-FileHash *.zip -Algorithm SHA256 | ForEach-Object { "$($_.Hash)  $([IO.Path]::GetFileName($_.Path))" } | Tee-Object -FilePath SHA256SUMS.txt
 
+      - name: Generate 720p test clip
+        shell: pwsh
+        run: |
+          function Resolve-FFmpeg {
+            $c = Get-Command ffmpeg -ErrorAction SilentlyContinue
+            if ($c) { return $c.Source }
+            foreach ($p in @("$env:ProgramFiles\ffmpeg\bin\ffmpeg.exe", "C:\ffmpeg\bin\ffmpeg.exe", "C:\tools\ffmpeg\bin\ffmpeg.exe", "C:\ProgramData\chocolatey\bin\ffmpeg.exe")) {
+              if (Test-Path $p) { return $p }
+            }
+            return $null
+          }
+          $ffmpeg = Resolve-FFmpeg
+          if (-not $ffmpeg) {
+            Write-Host "ffmpeg not on PATH - installing via chocolatey"
+            choco install ffmpeg -y --no-progress --limit-output
+            $env:PATH = "C:\ProgramData\chocolatey\bin;$env:PATH"
+            $ffmpeg = Resolve-FFmpeg
+          }
+          if (-not $ffmpeg) { throw "ffmpeg is unavailable (install failed)" }
+          Write-Host "ffmpeg: $ffmpeg"
+          $drawtext = (& $ffmpeg -hide_banner -filters 2>&1 | Select-String -Pattern 'drawtext')
+          if (-not $drawtext) { throw "this ffmpeg build has no drawtext filter (no freetype)" }
+          Write-Host "drawtext: $drawtext"
+
+          New-Item -ItemType Directory -Force media | Out-Null
+          $segments = 0..11 | ForEach-Object {
+            $s = $_ * 5
+            "drawtext=fontfile='C\:/Windows/Fonts/arialbd.ttf':text='LINE NUMBER $($_)':fontsize=42:fontcolor=white:borderw=3:bordercolor=black:x=(w-text_w)/2:y=h-95:enable='between(t,$s,$($s+3))'"
+          }
+          $filter = $segments -join ','
+          & $ffmpeg -v error -y -f lavfi -i "color=c=0x2a3b52:s=1280x720:r=25:d=60" -vf $filter -c:v libx264 -preset veryfast -crf 20 media\clip_720p_test.mp4
+          if ($LASTEXITCODE -ne 0) { throw "ffmpeg clip generation failed" }
+          Write-Host "clip bytes: $((Get-Item media\clip_720p_test.mp4).Length)"
+
+      - name: Verify -uc wiring (runner has no GPU -> expect device error, not 'built without CUDA')
+        shell: pwsh
+        run: |
+          $clip = Join-Path $env:GITHUB_WORKSPACE 'media\clip_720p_test.mp4'
+          # cpu has no USE_CUDA at all -> must refuse -uc at parse time.
+          # cuda / cuda_avx2 do have it -> must get past the parse check and fail on
+          # device init (the runner has no NVIDIA GPU).
+          $expect = [ordered]@{
+            cpu       = 'built without CUDA'
+            cuda      = 'CUDA device is unavailable'
+            cuda_avx2 = 'CUDA device is unavailable'
+          }
+          foreach ($v in $expect.Keys) {
+            $exe = (Resolve-Path "stage_$v\VideoSubFinderCli_$v.exe").Path
+            $out = Join-Path $env:GITHUB_WORKSPACE "uc_$v"
+            $log = Join-Path $env:GITHUB_WORKSPACE "uc_$v.log"
+            & $exe -ovffmpeg -uc -c -r -i $clip -o $out 2>&1 | Tee-Object -FilePath $log | Out-Null
+            $code = $LASTEXITCODE
+            $text = Get-Content $log -Raw
+            Write-Host "--- $v (exit=$code) ---"; Write-Host $text
+            if ($code -ne 1) { throw "$v : expected exit code 1 when refusing -uc, got $code" }
+            if ($text -notmatch [regex]::Escape($expect[$v])) {
+              throw "$v : expected '$($expect[$v])' in the -uc error output"
+            }
+          }
+          # Every expected path above exits 1 on purpose; do not let the last
+          # native exit code fail the step.
+          exit 0
+
+      - name: Identity check (CPU path must be unchanged by CUDA/AVX2 codegen)
+        shell: pwsh
+        run: |
+          function Get-ManifestHash([string]$dir) {
+            $files = Get-ChildItem $dir -Recurse -File -ErrorAction SilentlyContinue |
+              Where-Object { $_.Extension -match '^\.(jpeg|jpg|png|bmp|srt|txt)$' } | Sort-Object FullName
+            $lines = foreach ($f in $files) {
+              $h = (Get-FileHash $f.FullName -Algorithm SHA256).Hash
+              "$h  $($f.FullName.Substring($dir.Length))"
+            }
+            $bytes = [Text.Encoding]::UTF8.GetBytes(($lines -join "`n"))
+            $sha = [Security.Cryptography.SHA256]::Create()
+            [pscustomobject]@{
+              hash  = ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','')
+              files = $files.Count
+            }
+          }
+          $video = (Resolve-Path media\clip_720p_test.mp4).Path
+          $rows = @()
+          foreach ($v in @('cpu','cuda','cuda_avx2')) {
+            $exe = (Resolve-Path "stage_$v\VideoSubFinderCli_$v.exe").Path
+            $out = Join-Path $env:GITHUB_WORKSPACE "id_$v"
+            Remove-Item $out -Recurse -Force -ErrorAction SilentlyContinue
+            New-Item -ItemType Directory -Force $out | Out-Null
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            & $exe -ovffmpeg -c -r -i $video -o $out -te 0.115 -be 0.04 -le 0.2 -re 0.8 2>$null | Out-Null
+            $sw.Stop()
+            $m = Get-ManifestHash $out
+            $rows += [pscustomobject]@{ variant=$v; exit=$LASTEXITCODE; wall_s=[math]::Round($sw.Elapsed.TotalSeconds,3); rgb=(Get-ChildItem (Join-Path $out 'RGBImages') -File -ErrorAction SilentlyContinue).Count; files=$m.files; hash=$m.hash }
+          }
+          $rows | Format-Table -AutoSize | Out-String | Write-Host
+          $rows | Export-Csv -NoTypeInformation id_results.csv
+          $noText = @($rows | Where-Object { $_.rgb -eq 0 })
+          if ($noText.Count -gt 0) { throw "clip yielded no detected subtitles (RGBImages empty) - identity check would be meaningless" }
+          $uniq = ($rows | Select-Object -ExpandProperty hash | Sort-Object -Unique).Count
+          "identity_across_cpu_cuda_avx2=$($uniq -eq 1)" | Tee-Object -FilePath id_summary.txt
+          if ($uniq -ne 1) { throw "output differs between cpu / cuda / cuda_avx2 builds" }
+
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -352,4 +365,5 @@ jobs:
             depdll_*.txt
             uc_cpu.log
             uc_cuda.log
+            uc_cuda_avx2.log
           retention-days: 30
