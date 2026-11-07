@@ -70,6 +70,7 @@ jobs:
             -DVCPKG_TARGET_TRIPLET=x64-windows-static `
             -DVCPKG_OVERLAY_TRIPLETS="$env:GITHUB_WORKSPACE/triplets" `
             -DVCPKG_INSTALLED_DIR="$env:VCPKG_INSTALLED_DIR" `
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
             -DUSE_CUDA=OFF -DBUILD_TESTING=OFF
           if ($LASTEXITCODE -ne 0) { throw "configure sse2 failed" }
           cmake --build build_sse2 --parallel
@@ -83,6 +84,7 @@ jobs:
             -DVCPKG_TARGET_TRIPLET=x64-windows-static `
             -DVCPKG_OVERLAY_TRIPLETS="$env:GITHUB_WORKSPACE/triplets" `
             -DVCPKG_INSTALLED_DIR="$env:VCPKG_INSTALLED_DIR" `
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
             -DUSE_CUDA=OFF -DBUILD_TESTING=OFF -DVSF_ARCH_AVX2=ON
           if ($LASTEXITCODE -ne 0) { throw "configure avx2 failed" }
           cmake --build build_avx2 --parallel

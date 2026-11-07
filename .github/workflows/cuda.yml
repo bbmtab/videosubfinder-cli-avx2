@@ -102,6 +102,7 @@ jobs:
             -DVCPKG_TARGET_TRIPLET=x64-windows-static `
             -DVCPKG_OVERLAY_TRIPLETS="$env:GITHUB_WORKSPACE/triplets" `
             -DVCPKG_INSTALLED_DIR="$env:VCPKG_INSTALLED_DIR" `
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
             -DUSE_CUDA=OFF -DBUILD_TESTING=OFF
           if ($LASTEXITCODE -ne 0) { throw "configure cpu failed" }
           cmake --build build_cpu --parallel
@@ -115,8 +116,10 @@ jobs:
             -DVCPKG_TARGET_TRIPLET=x64-windows-static `
             -DVCPKG_OVERLAY_TRIPLETS="$env:GITHUB_WORKSPACE/triplets" `
             -DVCPKG_INSTALLED_DIR="$env:VCPKG_INSTALLED_DIR" `
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
             -DUSE_CUDA=ON -DBUILD_TESTING=OFF `
             -DCMAKE_CUDA_ARCHITECTURES="$env:CUDA_ARCH" `
+            -DCMAKE_CUDA_RUNTIME_LIBRARY=Shared `
             -DCMAKE_CUDA_FLAGS="-allow-unsupported-compiler"
           if ($LASTEXITCODE -ne 0) { throw "configure cuda failed" }
           cmake --build build_cuda --parallel
@@ -130,8 +133,10 @@ jobs:
             -DVCPKG_TARGET_TRIPLET=x64-windows-static `
             -DVCPKG_OVERLAY_TRIPLETS="$env:GITHUB_WORKSPACE/triplets" `
             -DVCPKG_INSTALLED_DIR="$env:VCPKG_INSTALLED_DIR" `
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
             -DUSE_CUDA=ON -DBUILD_TESTING=OFF -DVSF_ARCH_AVX2=ON `
             -DCMAKE_CUDA_ARCHITECTURES="$env:CUDA_ARCH" `
+            -DCMAKE_CUDA_RUNTIME_LIBRARY=Shared `
             -DCMAKE_CUDA_FLAGS="-allow-unsupported-compiler"
           if ($LASTEXITCODE -ne 0) { throw "configure cuda+avx2 failed" }
           cmake --build build_cuda_avx2 --parallel
