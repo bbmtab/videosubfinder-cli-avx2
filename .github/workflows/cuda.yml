@@ -55,9 +55,8 @@ jobs:
         uses: Jimver/cuda-toolkit@v0.2.36
         with:
           cuda: ${{ env.CUDA_VERSION }}
-          method: network
-          sub-packages: '["nvcc","cudart","nvrtc","npp","crt","visual_studio_integration"]'
-          use-github-cache: true
+          method: local
+          use-github-cache: false
           use-local-cache: true
 
       - name: Toolchain info
