@@ -22,6 +22,7 @@ jobs:
     env:
       VCPKG_DISABLE_METRICS: "1"
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vcpkg-bincache
+      VCPKG_DOWNLOADS: ${{ github.workspace }}\vcpkg-downloads
       VCPKG_ROOT: ${{ github.workspace }}\vcpkg
       VCPKG_INSTALLED_DIR: ${{ github.workspace }}\vcpkg_installed
 
@@ -36,7 +37,8 @@ jobs:
         run: |
           cmake --version | Select-Object -First 1
           ninja --version
-          (nvcc --version) 2>&1 | Select-Object -Last 2
+          if (Get-Command nvcc -ErrorAction SilentlyContinue) { nvcc --version | Select-Object -Last 2 }
+          else { "nvcc: not installed (CPU-only build)" }
           "commit=$((git rev-parse HEAD))"
 
       - name: Cache vcpkg (binary cache + downloads)
@@ -44,7 +46,7 @@ jobs:
         with:
           path: |
             ${{ github.workspace }}\vcpkg-bincache
-            ${{ github.workspace }}\vcpkg\downloads
+            ${{ github.workspace }}\vcpkg-downloads
           key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json', 'triplets/x64-windows-static.cmake') }}
           restore-keys: vcpkg-${{ runner.os }}-
 
