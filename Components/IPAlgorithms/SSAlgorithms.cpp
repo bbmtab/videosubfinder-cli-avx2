@@ -142,6 +142,7 @@ inline int AnalizeImageForSubPresence(simple_buffer<u8> &ImNE, simple_buffer<u8>
 template <class T1, class T2>
 inline void IntersectYImages(simple_buffer<T1> &ImRes, simple_buffer<T2> &Im2, int w, int h)
 {
+	VSF_PROFILE_SCOPE(P_INTERSECT_Y_2);
 	int i, size;
 
 	size = w * h;
@@ -164,6 +165,7 @@ inline void IntersectYImages(simple_buffer<T1> &ImRes, simple_buffer<T2> &Im2, i
 template <class T1, class T2>
 inline void IntersectYImages(simple_buffer<T1>& ImRes, simple_buffer<simple_buffer<T2>*>& ImIn, int min_id_im_in, int max_id_im_in, int w, int h)
 {
+	VSF_PROFILE_SCOPE(P_INTERSECT_Y_N);
 	int i, size, im_id;
 
 	size = w * h;
@@ -2112,6 +2114,7 @@ s64 FastSearchSubtitles(CVideo *pV, s64 Begin, s64 End)
 
 int AnalyseImage(simple_buffer<u8>& Im, simple_buffer<u16>* pImILA, int w, int h)
 {
+	VSF_PROFILE_SCOPE(P_ANALYSE_IMAGE);
 	int i, k, l, x, y, ia, da, pl, mpl, i_mpl, len, len2, val1, val2, n, bln;
 	int segh, mtl;	
 	double tp;
@@ -2852,6 +2855,7 @@ int CompareTwoSubs(simple_buffer<u8>& Im1, simple_buffer<u16>* pImILA1, simple_b
 
 int CompareTwoSubsOptimal(simple_buffer<u8>& Im1, simple_buffer<u16>* pImILA1, simple_buffer<u8>& ImVE11, simple_buffer<u8>& ImVE12, simple_buffer<u8>& Im2, simple_buffer<u16>* pImILA2, simple_buffer<u8>& ImVE2, int w, int h, int W, int H, int min_x, int max_x, std::string iter_det)
 {
+	VSF_PROFILE_SCOPE(P_CMP_TWO_SUBS_OPTIMAL);
 	int bln = 0;
 	
 	if (bln == 0)

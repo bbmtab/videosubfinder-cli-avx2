@@ -19,6 +19,7 @@
 #include "SSAlgorithms.h"
 #include "DataTypes.h"
 #include "MyClosedFigure.h"
+#include "VSFProfiler.h"
 #include <fstream>
 #include <algorithm>
 #include <opencv2/core.hpp>
@@ -230,6 +231,7 @@ void CombineTwoImages(simple_buffer<T>& ImRes, simple_buffer<T>& Im2, int w, int
 template <class T1, class T2>
 void IntersectTwoImages(simple_buffer<T1>& ImRes, simple_buffer<T2>& Im2, int w, int h, T1 zero_val)
 {
+	VSF_PROFILE_SCOPE(P_INTERSECT_TWO_IMAGES);
 	int i, size;
 
 	size = w * h;
@@ -245,6 +247,7 @@ void IntersectTwoImages(simple_buffer<T1>& ImRes, simple_buffer<T2>& Im2, int w,
 template <class T1, class T2>
 void IntersectImages(simple_buffer<T1>& ImRes, simple_buffer<simple_buffer<T2>*>& ImIn, int min_id_im_in, int max_id_im_in, int w, int h)
 {
+	VSF_PROFILE_SCOPE(P_INTERSECT_IMAGES);
 	int i, size, im_id;
 
 	size = w * h;
