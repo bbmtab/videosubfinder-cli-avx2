@@ -1,0 +1,297 @@
+name: cuda
+
+# Temp fork: build a Windows CUDA-ready VideoSubFinder CLI package.
+#
+# Target hardware: GTX 1070 (Pascal, compute capability 6.1 / sm_61).
+# CUDA 12.6.3 is used because it is the newest line that still ships proper
+# SASS for sm_61; CUDA 13.x dropped all Pascal targets ("Unsupported gpu
+# architecture 'sm_61'").
+#
+# Artifacts:
+#   vsf-cli-cuda      - VideoSubFinderCli_cuda.exe   (CUDA on, SSE2 codegen)
+#   vsf-cli-cuda-avx2 - VideoSubFinderCli_cuda_avx2.exe (CUDA on + /arch:AVX2, experimental)
+# plus the CPU reference build used for the identity check.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/cuda.yml'
+  workflow_dispatch:
+    inputs:
+      cuda_version:
+        description: 'CUDA toolkit version (must still support sm_61 -> use 12.x)'
+        required: false
+        default: '12.6.3'
+      cuda_arch:
+        description: 'CMAKE_CUDA_ARCHITECTURES (61 = GTX 10xx / Pascal)'
+        required: false
+        default: '61;75;86'
+
+permissions:
+  contents: read
+
+env:
+  VCPKG_DISABLE_METRICS: "1"
+  VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vcpkg-bincache
+  VCPKG_DOWNLOADS: ${{ github.workspace }}\vcpkg-downloads
+  VCPKG_ROOT: ${{ github.workspace }}\vcpkg
+  VCPKG_INSTALLED_DIR: ${{ github.workspace }}\vcpkg_installed
+  CUDA_VERSION: ${{ inputs.cuda_version || '12.6.3' }}
+  CUDA_ARCH: ${{ inputs.cuda_arch || '61;75;86' }}
+
+jobs:
+  build-windows-cuda:
+    runs-on: windows-2022
+    timeout-minutes: 360
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install CUDA toolkit ${{ env.CUDA_VERSION }}
+        uses: Jimver/cuda-toolkit@v0.2.36
+        with:
+          cuda: ${{ env.CUDA_VERSION }}
+          method: network
+          sub-packages: '["nvcc","cudart","nvrtc","npp","crt","visual_studio_integration"]'
+          use-github-cache: true
+          use-local-cache: true
+
+      - name: Toolchain info
+        shell: pwsh
+        run: |
+          "CUDA_PATH=$env:CUDA_PATH"
+          nvcc --version | Select-Object -Last 2
+          $archs = (nvcc --list-gpu-arch) -join ' '
+          "supported archs: $archs"
+          if ($archs -notmatch 'compute_61') { throw "This CUDA toolkit cannot target sm_61 (Pascal/GTX 10xx)" }
+          cmake --version | Select-Object -First 1
+          ninja --version
+          "commit=$((git rev-parse HEAD))"
+
+      - name: Cache vcpkg (binary cache + downloads)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ github.workspace }}\vcpkg-bincache
+            ${{ github.workspace }}\vcpkg-downloads
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json', 'triplets/x64-windows-static.cmake') }}
+          restore-keys: vcpkg-${{ runner.os }}-
+
+      - name: Bootstrap vcpkg
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force "$env:VCPKG_DEFAULT_BINARY_CACHE" | Out-Null
+          if (-not (Test-Path "$env:VCPKG_ROOT\.git")) {
+            git clone https://github.com/microsoft/vcpkg.git "$env:VCPKG_ROOT"
+          }
+          & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
+          & "$env:VCPKG_ROOT\vcpkg.exe" version
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure CPU reference (no CUDA, no AVX2)
+        shell: pwsh
+        run: |
+          cmake -S . -B build_cpu -G Ninja -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows-static `
+            -DVCPKG_OVERLAY_TRIPLETS="$env:GITHUB_WORKSPACE/triplets" `
+            -DVCPKG_INSTALLED_DIR="$env:VCPKG_INSTALLED_DIR" `
+            -DUSE_CUDA=OFF -DBUILD_TESTING=OFF
+          if ($LASTEXITCODE -ne 0) { throw "configure cpu failed" }
+          cmake --build build_cpu --parallel
+          if ($LASTEXITCODE -ne 0) { throw "build cpu failed" }
+
+      - name: Configure + build CUDA (arch ${{ env.CUDA_ARCH }})
+        shell: pwsh
+        run: |
+          cmake -S . -B build_cuda -G Ninja -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows-static `
+            -DVCPKG_OVERLAY_TRIPLETS="$env:GITHUB_WORKSPACE/triplets" `
+            -DVCPKG_INSTALLED_DIR="$env:VCPKG_INSTALLED_DIR" `
+            -DUSE_CUDA=ON -DBUILD_TESTING=OFF `
+            -DCMAKE_CUDA_ARCHITECTURES="$env:CUDA_ARCH" `
+            -DCMAKE_CUDA_FLAGS="-allow-unsupported-compiler"
+          if ($LASTEXITCODE -ne 0) { throw "configure cuda failed" }
+          cmake --build build_cuda --parallel
+          if ($LASTEXITCODE -ne 0) { throw "build cuda failed" }
+
+      - name: Configure + build CUDA + AVX2 (experimental)
+        shell: pwsh
+        run: |
+          cmake -S . -B build_cuda_avx2 -G Ninja -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows-static `
+            -DVCPKG_OVERLAY_TRIPLETS="$env:GITHUB_WORKSPACE/triplets" `
+            -DVCPKG_INSTALLED_DIR="$env:VCPKG_INSTALLED_DIR" `
+            -DUSE_CUDA=ON -DBUILD_TESTING=OFF -DVSF_ARCH_AVX2=ON `
+            -DCMAKE_CUDA_ARCHITECTURES="$env:CUDA_ARCH" `
+            -DCMAKE_CUDA_FLAGS="-allow-unsupported-compiler"
+          if ($LASTEXITCODE -ne 0) { throw "configure cuda+avx2 failed" }
+          cmake --build build_cuda_avx2 --parallel
+          if ($LASTEXITCODE -ne 0) { throw "build cuda+avx2 failed" }
+
+      - name: Stage all three variants
+        shell: pwsh
+        run: |
+          $map = @{ cpu = 'build_cpu'; cuda = 'build_cuda'; cuda_avx2 = 'build_cuda_avx2' }
+          foreach ($v in $map.Keys) {
+            $dst = "stage_$v"
+            New-Item -ItemType Directory -Force $dst | Out-Null
+            Copy-Item "$($map[$v])\VideoSubFinderCli.exe" "$dst\VideoSubFinderCli_$v.exe"
+            Copy-Item -Recurse "$($map[$v])\settings" "$dst\settings"
+            & ".\$dst\VideoSubFinderCli_$v.exe" --version
+            if ($LASTEXITCODE -ne 0) { throw "version check failed for $v" }
+          }
+          Get-ChildItem stage_*\*.exe | Select-Object FullName, Length | Format-Table -AutoSize | Out-String | Write-Host
+
+      - name: Verify sm_61 SASS is embedded
+        shell: pwsh
+        run: |
+          foreach ($v in @('cuda','cuda_avx2')) {
+            $exe = "stage_$v\VideoSubFinderCli_$v.exe"
+            cuobjdump --list-elf $exe > "elf_$v.txt" 2>&1
+            $t = Get-Content "elf_$v.txt" -Raw
+            Write-Host "--- $v ---"
+            Write-Host $t
+            if ($t -notmatch 'sm_61') { throw "$v : no sm_61 cubin in the executable" }
+          }
+          foreach ($v in @('cuda','cuda_avx2')) {
+            dumpbin /dependents "stage_$v\VideoSubFinderCli_$v.exe" > "dep_$v.txt"
+            $d = Get-Content "dep_$v.txt" -Raw
+            foreach ($need in @('cudart64_12.dll','nppc64_12.dll','nppicc64_12.dll','nppig64_12.dll')) {
+              if ($d -notmatch [regex]::Escape($need)) { throw "$v : missing import $need" }
+            }
+            Write-Host "$v : all CUDA runtime imports present"
+          }
+
+      - name: Generate 720p test clip
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force media | Out-Null
+          $segments = 0..11 | ForEach-Object {
+            $s = $_ * 5
+            "drawtext=fontfile='C\:/Windows/Fonts/arialbd.ttf':text='LINE NUMBER $($_)':fontsize=42:fontcolor=white:borderw=3:bordercolor=black:x=(w-text_w)/2:y=h-95:enable='between(t,$s,$($s+3))'"
+          }
+          $filter = $segments -join ','
+          ffmpeg -v error -y -f lavfi -i "color=c=0x2a3b52:s=1280x720:r=25:d=60" -vf $filter -c:v libx264 -preset veryfast -crf 20 media\clip_720p_test.mp4
+          if ($LASTEXITCODE -ne 0) { throw "ffmpeg clip generation failed" }
+
+      - name: Verify -uc wiring (runner has no GPU -> expect device error, not 'built without CUDA')
+        shell: pwsh
+        run: |
+          $clip = Join-Path $env:GITHUB_WORKSPACE 'media\clip_720p_test.mp4'
+          foreach ($v in @('cpu','cuda')) {
+            $exe = (Resolve-Path "stage_$v\VideoSubFinderCli_$v.exe").Path
+            $out = Join-Path $env:GITHUB_WORKSPACE "uc_$v"
+            $log = Join-Path $env:GITHUB_WORKSPACE "uc_$v.log"
+            & $exe -ovffmpeg -uc -c -r -i $clip -o $out 2>&1 | Tee-Object -FilePath $log | Out-Null
+            $code = $LASTEXITCODE
+            $text = Get-Content $log -Raw
+            Write-Host "--- $v (exit=$code) ---"; Write-Host $text
+            if ($v -eq 'cpu' -and $text -notmatch 'built without CUDA') { throw "cpu build should reject -uc" }
+            if ($v -eq 'cuda' -and $text -notmatch 'CUDA device is unavailable') { throw "cuda build should reach device init" }
+          }
+
+      - name: Identity check (CPU path must be unchanged by CUDA/AVX2 codegen)
+        shell: pwsh
+        run: |
+          function Get-ManifestHash([string]$dir) {
+            $files = Get-ChildItem $dir -Recurse -File -ErrorAction SilentlyContinue |
+              Where-Object { $_.Extension -match '^\.(jpeg|jpg|png|bmp|srt|txt)$' } | Sort-Object FullName
+            $lines = foreach ($f in $files) {
+              $h = (Get-FileHash $f.FullName -Algorithm SHA256).Hash
+              "$h  $($f.FullName.Substring($dir.Length))"
+            }
+            $bytes = [Text.Encoding]::UTF8.GetBytes(($lines -join "`n"))
+            $sha = [Security.Cryptography.SHA256]::Create()
+            [pscustomobject]@{
+              hash  = ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','')
+              files = $files.Count
+            }
+          }
+          $video = (Resolve-Path media\clip_720p_test.mp4).Path
+          $rows = @()
+          foreach ($v in @('cpu','cuda','cuda_avx2')) {
+            $exe = (Resolve-Path "stage_$v\VideoSubFinderCli_$v.exe").Path
+            $out = Join-Path $env:GITHUB_WORKSPACE "id_$v"
+            Remove-Item $out -Recurse -Force -ErrorAction SilentlyContinue
+            New-Item -ItemType Directory -Force $out | Out-Null
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            & $exe -ovffmpeg -c -r -i $video -o $out -te 0.115 -be 0.04 -le 0.2 -re 0.8 2>$null | Out-Null
+            $sw.Stop()
+            $m = Get-ManifestHash $out
+            $rows += [pscustomobject]@{ variant=$v; exit=$LASTEXITCODE; wall_s=[math]::Round($sw.Elapsed.TotalSeconds,3); files=$m.files; hash=$m.hash }
+          }
+          $rows | Format-Table -AutoSize | Out-String | Write-Host
+          $rows | Export-Csv -NoTypeInformation id_results.csv
+          $uniq = ($rows | Select-Object -ExpandProperty hash | Sort-Object -Unique).Count
+          "identity_across_cpu_cuda_avx2=$($uniq -eq 1)" | Tee-Object -FilePath id_summary.txt
+          if ($uniq -ne 1) { throw "output differs between cpu / cuda / cuda_avx2 builds" }
+
+      - name: Package CUDA distribution
+        shell: pwsh
+        run: |
+          $cudaBin = Join-Path $env:CUDA_PATH 'bin'
+          $dlls = @('cudart64_12.dll','nppc64_12.dll','nppicc64_12.dll','nppig64_12.dll')
+          foreach ($v in @('cuda','cuda_avx2')) {
+            foreach ($d in $dlls) {
+              $src = Join-Path $cudaBin $d
+              if (-not (Test-Path $src)) {
+                $src = Get-ChildItem $env:CUDA_PATH -Recurse -Filter $d -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+              }
+              if (-not $src -or -not (Test-Path $src)) { throw "cannot locate $d in the CUDA toolkit" }
+              Copy-Item $src "stage_$v\$d" -Force
+            }
+            $sha = (git rev-parse --short HEAD)
+            $readme = @(
+              'VideoSubFinder CLI - CUDA build for GTX (Pascal / sm_61)',
+              '',
+              "exe      : VideoSubFinderCli_$v.exe",
+              "CUDA     : $env:CUDA_VERSION  (SASS architectures: $env:CUDA_ARCH)",
+              "built    : $sha",
+              '',
+              'GPU use is opt-in. Add -uc to enable CUDA (kmeans clustering + NV12->BGR):',
+              '',
+              "  VideoSubFinderCli_$v.exe -ovffmpeg -uc -c -r -i `"input.mp4`" -o `"out`" -te 0.115 -be 0.04 -le 0.2 -re 0.8",
+              '',
+              'Without -uc the binary runs on the CPU, identically to the non-CUDA build.',
+              'Keep the four cudart64_12/npp*_12 DLLs next to the exe.'
+            ) -join "`r`n"
+            Set-Content -Path "stage_$v\README_CUDA.txt" -Value $readme -Encoding ASCII
+            $bat = @(
+              '@echo off',
+              "`"%~dp0VideoSubFinderCli_$v.exe`" -ovffmpeg -uc -c -r -i `"%~1`" -o `"%~dpn1_out`" -te 0.115 -be 0.04 -le 0.2 -re 0.8",
+              'pause'
+            ) -join "`r`n"
+            Set-Content -Path "stage_$v\run_cuda.bat" -Value $bat -Encoding ASCII
+            Compress-Archive -Path "stage_$v\*" -DestinationPath "videosubfinder-cli-windows-$v-x64.zip" -Force
+          }
+          Get-ChildItem *.zip | Select-Object Name, @{n='MB';e={[math]::Round($_.Length/1MB,1)}} | Format-Table -AutoSize | Out-String | Write-Host
+          Get-FileHash *.zip -Algorithm SHA256 | ForEach-Object { "$($_.Hash)  $([IO.Path]::GetFileName($_.Path))" } | Tee-Object -FilePath SHA256SUMS.txt
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vsf-cli-cuda
+          path: |
+            videosubfinder-cli-windows-cuda-x64.zip
+            videosubfinder-cli-windows-cuda_avx2-x64.zip
+            SHA256SUMS.txt
+            id_results.csv
+            id_summary.txt
+            elf_cuda.txt
+            elf_cuda_avx2.txt
+            dep_cuda.txt
+            dep_cuda_avx2.txt
+            uc_cpu.log
+            uc_cuda.log
+          retention-days: 30
