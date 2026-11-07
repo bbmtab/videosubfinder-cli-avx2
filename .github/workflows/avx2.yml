@@ -1,0 +1,202 @@
+name: avx2
+
+# Temp fork: build VideoSubFinder CLI twice from the SAME commit (baseline vs /arch:AVX2)
+# and A/B them end-to-end on a generated 720p clip. Artifact suffix: avx2.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: avx2-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-ab:
+    runs-on: windows-latest
+    timeout-minutes: 300
+    env:
+      VCPKG_DISABLE_METRICS: "1"
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vcpkg-bincache
+      VCPKG_ROOT: ${{ github.workspace }}\vcpkg
+      VCPKG_INSTALLED_DIR: ${{ github.workspace }}\vcpkg_installed
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Toolchain info
+        shell: pwsh
+        run: |
+          cmake --version | Select-Object -First 1
+          ninja --version
+          (nvcc --version) 2>&1 | Select-Object -Last 2
+          "commit=$((git rev-parse HEAD))"
+
+      - name: Cache vcpkg (binary cache + downloads)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ github.workspace }}\vcpkg-bincache
+            ${{ github.workspace }}\vcpkg\downloads
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json', 'triplets/x64-windows-static.cmake') }}
+          restore-keys: vcpkg-${{ runner.os }}-
+
+      - name: Bootstrap vcpkg
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force "$env:VCPKG_DEFAULT_BINARY_CACHE" | Out-Null
+          git clone https://github.com/microsoft/vcpkg.git "$env:VCPKG_ROOT"
+          & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
+          & "$env:VCPKG_ROOT\vcpkg.exe" version
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure + build baseline (SSE2, MSVC default)
+        shell: pwsh
+        run: |
+          cmake -S . -B build_sse2 -G Ninja -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows-static `
+            -DVCPKG_OVERLAY_TRIPLETS="$env:GITHUB_WORKSPACE/triplets" `
+            -DVCPKG_INSTALLED_DIR="$env:VCPKG_INSTALLED_DIR" `
+            -DUSE_CUDA=OFF -DBUILD_TESTING=OFF
+          if ($LASTEXITCODE -ne 0) { throw "configure sse2 failed" }
+          cmake --build build_sse2 --parallel
+          if ($LASTEXITCODE -ne 0) { throw "build sse2 failed" }
+
+      - name: Configure + build variant (suffix avx2)
+        shell: pwsh
+        run: |
+          cmake -S . -B build_avx2 -G Ninja -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows-static `
+            -DVCPKG_OVERLAY_TRIPLETS="$env:GITHUB_WORKSPACE/triplets" `
+            -DVCPKG_INSTALLED_DIR="$env:VCPKG_INSTALLED_DIR" `
+            -DUSE_CUDA=OFF -DBUILD_TESTING=OFF -DVSF_ARCH_AVX2=ON
+          if ($LASTEXITCODE -ne 0) { throw "configure avx2 failed" }
+          cmake --build build_avx2 --parallel
+          if ($LASTEXITCODE -ne 0) { throw "build avx2 failed" }
+
+      - name: Stage both variants
+        shell: pwsh
+        run: |
+          foreach ($v in @('sse2','avx2')) {
+            $dst = "stage_$v"
+            New-Item -ItemType Directory -Force $dst | Out-Null
+            Copy-Item "build_$v\VideoSubFinderCli.exe" "$dst\VideoSubFinderCli_$v.exe"
+            Copy-Item -Recurse "build_$v\settings" "$dst\settings"
+            & ".\$dst\VideoSubFinderCli_$v.exe" --version
+          }
+          Get-ChildItem stage_*\*.exe | Select-Object FullName, Length
+
+      - name: Verify YMM (arithmetic/bitwise, not just vmov)
+        shell: pwsh
+        run: |
+          foreach ($v in @('sse2','avx2')) {
+            $exe = "stage_$v\VideoSubFinderCli_$v.exe"
+            dumpbin /disasm $exe > "dis_$v.txt"
+            $t = Get-Content "dis_$v.txt" -Raw
+            [pscustomobject]@{
+              exe     = $exe
+              ymm     = ([regex]::Matches($t,'ymm')).Count
+              vadd    = ([regex]::Matches($t,'\bv(add|sub|mul|padd|psub)')).Count
+              vpand   = ([regex]::Matches($t,'vp(and|or|xor|andn)')).Count
+              vpcmpeq = ([regex]::Matches($t,'vpcmpe')).Count
+              vmov    = ([regex]::Matches($t,'vmov')).Count
+              xmm     = ([regex]::Matches($t,'xmm')).Count
+            } | Format-List | Out-String | Write-Host
+          }
+
+      - name: Generate 720p test clip with burned subtitles
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force media | Out-Null
+          $segments = 0..11 | ForEach-Object {
+            $s = $_ * 5
+            "drawtext=fontfile='C\:/Windows/Fonts/arialbd.ttf':text='LINE NUMBER $($_)':fontsize=42:fontcolor=white:borderw=3:bordercolor=black:x=(w-text_w)/2:y=h-95:enable='between(t,$s,$($s+3))'"
+          }
+          $filter = $segments -join ','
+          ffmpeg -v error -y -f lavfi -i "color=c=0x2a3b52:s=1280x720:r=25:d=60" -vf $filter -c:v libx264 -preset veryfast -crf 20 media\clip_720p_test.mp4
+          if ($LASTEXITCODE -ne 0) { throw "ffmpeg clip generation failed" }
+          ffprobe -v error -show_entries format=duration,size -of default=nw=1 media\clip_720p_test.mp4
+
+      - name: End-to-end A/B (same clip, same flags, 3 runs each)
+        shell: pwsh
+        run: |
+          function Get-ManifestHash([string]$dir) {
+            $files = Get-ChildItem $dir -Recurse -File -ErrorAction SilentlyContinue |
+              Where-Object { $_.Extension -match '^\.(jpeg|jpg|png|bmp|srt|txt)$' } | Sort-Object FullName
+            $lines = foreach ($f in $files) {
+              $h = (Get-FileHash $f.FullName -Algorithm SHA256).Hash
+              "$h  $($f.FullName.Substring($dir.Length))"
+            }
+            $bytes = [Text.Encoding]::UTF8.GetBytes(($lines -join "`n"))
+            $sha = [Security.Cryptography.SHA256]::Create()
+            [pscustomobject]@{
+              hash  = ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','')
+              files = $files.Count
+            }
+          }
+          $video = (Resolve-Path media\clip_720p_test.mp4).Path
+          $rows = @()
+          foreach ($v in @('sse2','avx2')) {
+            $exe = (Resolve-Path "stage_$v\VideoSubFinderCli_$v.exe").Path
+            for ($i = 1; $i -le 3; $i++) {
+              $out = Join-Path $env:GITHUB_WORKSPACE "ab_${v}_$i"
+              Remove-Item $out -Recurse -Force -ErrorAction SilentlyContinue
+              New-Item -ItemType Directory -Force $out | Out-Null
+              $sw = [Diagnostics.Stopwatch]::StartNew()
+              & $exe -ovffmpeg -c -r -i $video -o $out -te 0.115 -be 0.04 -le 0.2 -re 0.8 2>$null | Out-Null
+              $sw.Stop()
+              $code = $LASTEXITCODE
+              $m = Get-ManifestHash $out
+              $rows += [pscustomobject]@{
+                variant = $v
+                run     = $i
+                wall_s  = [math]::Round($sw.Elapsed.TotalSeconds, 3)
+                exit    = $code
+                rgb     = (Get-ChildItem (Join-Path $out 'RGBImages') -File -ErrorAction SilentlyContinue).Count
+                files   = $m.files
+                hash    = $m.hash
+              }
+            }
+          }
+          $rows | Format-Table -AutoSize | Out-String | Write-Host
+          $rows | Export-Csv -NoTypeInformation ab_results.csv
+          foreach ($v in @('sse2','avx2')) {
+            $vals = $rows | Where-Object variant -eq $v | Select-Object -ExpandProperty wall_s | Sort-Object
+            $med = $vals[[int]($vals.Count/2)]
+            $hashes = ($rows | Where-Object variant -eq $v | Select-Object -ExpandProperty hash | Sort-Object -Unique) -join ','
+            Write-Host "$v median=$med s hashes=$hashes"
+          }
+          $sse2 = $rows | Where-Object variant -eq 'sse2' | Select-Object -ExpandProperty wall_s | Sort-Object
+          $avx2 = $rows | Where-Object variant -eq 'avx2' | Select-Object -ExpandProperty wall_s | Sort-Object
+          $ms = $sse2[[int]($sse2.Count/2)]; $ma = $avx2[[int]($avx2.Count/2)]
+          $gain = [math]::Round((($ms - $ma) / $ms) * 100, 2)
+          $same = (($rows | Select-Object -ExpandProperty hash | Sort-Object -Unique).Count -eq 1)
+          Write-Host "identity=$same median_sse2=$ms median_avx2=$ma speedup_pct=$gain" |
+            Tee-Object -FilePath ab_summary.txt
+
+      - name: Upload artifacts (suffix avx2)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vsf-cli-avx2
+          path: |
+            stage_sse2/**
+            stage_avx2/**
+            dis_sse2.txt
+            dis_avx2.txt
+            ab_results.csv
+            ab_summary.txt
+            media/clip_720p_test.mp4
+          retention-days: 30
